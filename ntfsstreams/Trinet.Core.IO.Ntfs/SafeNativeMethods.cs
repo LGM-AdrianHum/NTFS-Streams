@@ -24,12 +24,9 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
-using Trinet.Core.IO.Ntfs.Properties;
 
 namespace Trinet.Core.IO.Ntfs
 {
-	using Resources = Resources;
-
 	/// <summary>
 	/// Safe native methods.
 	/// </summary>
@@ -43,6 +40,7 @@ namespace Trinet.Core.IO.Ntfs
 		public const int DefaultBufferSize = 0x1000;
 
 		private const int ErrorFileNotFound = 2;
+		private const int ErrorPathNotFound = 3;
 
 		// "Characters whose integer representations are in the range from 1 through 31, 
 		// except for alternate streams where these characters are allowed"
@@ -85,17 +83,6 @@ namespace Trinet.Core.IO.Ntfs
 			{
 				return (High * 0x100000000) + Low;
 			}
-
-			/*
-			public static LargeInteger FromInt64(long value)
-			{
-				return new LargeInteger
-				{
-					Low = (int)(value & 0x11111111),
-					High = (int)((value / 0x100000000) & 0x11111111)
-				};
-			}
-			*/
 		}
 
 		[StructLayout(LayoutKind.Sequential)]
@@ -106,21 +93,6 @@ namespace Trinet.Core.IO.Ntfs
 			public LargeInteger Size;
 			public readonly int StreamNameSize;
 		}
-
-/*
-		[StructLayout(LayoutKind.Sequential)]
-		private struct FileInformationByHandle
-		{
-			public int dwFileAttributes;
-			public LargeInteger ftCreationTime;
-			public LargeInteger ftLastAccessTime;
-			public LargeInteger ftLastWriteTime;
-			public int dwVolumeSerialNumber;
-			public LargeInteger FileSize;
-			public int nNumberOfLinks;
-			public LargeInteger FileIndex;
-		}
-*/
 
 		#endregion
 
@@ -221,7 +193,7 @@ namespace Trinet.Core.IO.Ntfs
 				return lpBuffer.ToString();
 			}
 
-			return string.Format(Resources.Culture, Resources.Error_UnknownError, errorCode);
+			return Resources.Error_UnknownError(errorCode);
 		}
 
 		private static void ThrowIOError(int errorCode, string path)
@@ -240,28 +212,28 @@ namespace Trinet.Core.IO.Ntfs
 				case 3: // Directory not found
 				{
 					if (string.IsNullOrEmpty(path)) throw new DirectoryNotFoundException();
-					throw new DirectoryNotFoundException(string.Format(Resources.Culture, Resources.Error_DirectoryNotFound, path));
+					throw new DirectoryNotFoundException(Resources.Error_DirectoryNotFound(path));
 				}
 				case 5: // Access denied
 				{
 					if (string.IsNullOrEmpty(path)) throw new UnauthorizedAccessException();
-					throw new UnauthorizedAccessException(string.Format(Resources.Culture, Resources.Error_AccessDenied_Path, path));
+					throw new UnauthorizedAccessException(Resources.Error_AccessDenied_Path(path));
 				}
 				case 15: // Drive not found
 				{
 					if (string.IsNullOrEmpty(path)) throw new DriveNotFoundException();
-					throw new DriveNotFoundException(string.Format(Resources.Culture, Resources.Error_DriveNotFound, path));
+					throw new DriveNotFoundException(Resources.Error_DriveNotFound(path));
 				}
 				case 32: // Sharing violation
 				{
 					if (string.IsNullOrEmpty(path)) throw new IOException(GetErrorMessage(errorCode), MakeHRFromErrorCode(errorCode));
-					throw new IOException(string.Format(Resources.Culture, Resources.Error_SharingViolation, path), MakeHRFromErrorCode(errorCode));
+					throw new IOException(Resources.Error_SharingViolation(path), MakeHRFromErrorCode(errorCode));
 				}
 				case 80: // File already exists
 				{
 					if (!string.IsNullOrEmpty(path))
 					{
-						throw new IOException(string.Format(Resources.Culture, Resources.Error_FileAlreadyExists, path), MakeHRFromErrorCode(errorCode));
+						throw new IOException(Resources.Error_FileAlreadyExists(path), MakeHRFromErrorCode(errorCode));
 					}
 					break;
 				}
@@ -273,7 +245,7 @@ namespace Trinet.Core.IO.Ntfs
 				{
 					if (!string.IsNullOrEmpty(path))
 					{
-						throw new IOException(string.Format(Resources.Culture, Resources.Error_AlreadyExists, path), MakeHRFromErrorCode(errorCode));
+						throw new IOException(Resources.Error_AlreadyExists(path), MakeHRFromErrorCode(errorCode));
 					}
 					break;
 				}
@@ -314,13 +286,29 @@ namespace Trinet.Core.IO.Ntfs
 
 		public static string BuildStreamPath(string filePath, string streamName)
 		{
+			if (string.IsNullOrEmpty(filePath)) return string.Empty;
+
+			// Trailing slashes on directory paths don't work:
+
 			string result = filePath;
-			if (!string.IsNullOrEmpty(filePath))
+			int length = result.Length;
+			while (0 < length && '\\' == result[length - 1])
 			{
-				if (1 == result.Length) result = ".\\" + result;
-				result += StreamSeparator + streamName + StreamSeparator + "$DATA";
-				if (MaxPath <= result.Length) result = LongPathPrefix + result;
+				length--;
 			}
+
+			if (length != result.Length)
+			{
+				result = 0 == length ? "." : result.Substring(0, length);
+			}
+
+			result += StreamSeparator + streamName + StreamSeparator + "$DATA";
+
+			if (MaxPath <= result.Length && !result.StartsWith(LongPathPrefix))
+			{
+				result = LongPathPrefix + result;
+			}
+
 			return result;
 		}
 
@@ -328,33 +316,59 @@ namespace Trinet.Core.IO.Ntfs
 		{
 			if (!string.IsNullOrEmpty(streamName) && -1 != streamName.IndexOfAny(InvalidStreamNameChars))
 			{
-				throw new ArgumentException(Resources.Error_InvalidFileChars);
+				throw new ArgumentException(Resources.Error_InvalidFileChars());
 			}
 		}
 
-		public static int SafeGetFileAttributes(string name)
+		private static int SafeGetFileAttributes(string name)
 		{
-			if (string.IsNullOrEmpty(name)) throw new ArgumentNullException("name");
+			if (string.IsNullOrEmpty(name)) throw new ArgumentNullException(nameof(name));
 
 			int result = GetFileAttributes(name);
 			if (-1 == result)
 			{
 				int errorCode = Marshal.GetLastWin32Error();
-				if (ErrorFileNotFound != errorCode) ThrowLastIOError(name);
+				switch (errorCode)
+				{
+					case ErrorFileNotFound:
+					case ErrorPathNotFound:
+					{
+						break;
+					}
+					default:
+					{
+						ThrowLastIOError(name);
+						break;
+					}
+				}
 			}
 
 			return result;
 		}
 
+		public static bool FileExists(string name) => -1 != SafeGetFileAttributes(name);
+
 		public static bool SafeDeleteFile(string name)
 		{
-			if (string.IsNullOrEmpty(name)) throw new ArgumentNullException("name");
+			if (string.IsNullOrEmpty(name)) throw new ArgumentNullException(nameof(name));
 
 			bool result = DeleteFile(name);
 			if (!result)
 			{
 				int errorCode = Marshal.GetLastWin32Error();
-				if (ErrorFileNotFound != errorCode) ThrowLastIOError(name);
+				switch (errorCode)
+				{
+					case ErrorFileNotFound:
+					case ErrorPathNotFound:
+					{
+						break;
+					}
+					default:
+					{
+						ThrowLastIOError(name);
+						break;
+					}
+				}
 			}
 
 			return result;
@@ -366,8 +380,7 @@ namespace Trinet.Core.IO.Ntfs
 			if (!result.IsInvalid && 1 != GetFileType(result))
 			{
 				result.Dispose();
-				throw new NotSupportedException(string.Format(Resources.Culture,
-					Resources.Error_NonFile, path));
+				throw new NotSupportedException(Resources.Error_NonFile(path));
 			}
 
 			return result;
@@ -378,8 +391,7 @@ namespace Trinet.Core.IO.Ntfs
 			long result = 0L;
 			if (null != handle && !handle.IsInvalid)
 			{
-				LargeInteger value;
-				if (GetFileSizeEx(handle, out value))
+				if (GetFileSizeEx(handle, out var value))
 				{
 					result = value.ToInt64();
 				}
@@ -408,8 +420,8 @@ namespace Trinet.Core.IO.Ntfs
 
 		public static IList<Win32StreamInfo> ListStreams(string filePath)
 		{
-			if (string.IsNullOrEmpty(filePath)) throw new ArgumentNullException("filePath");
-			if (-1 != filePath.IndexOfAny(Path.GetInvalidPathChars())) throw new ArgumentException(Resources.Error_InvalidFileChars, "filePath");
+			if (string.IsNullOrEmpty(filePath)) throw new ArgumentNullException(nameof(filePath));
+			if (-1 != filePath.IndexOfAny(Path.GetInvalidPathChars())) throw new ArgumentException(Resources.Error_InvalidFileChars(), nameof(filePath));
 
 			var result = new List<Win32StreamInfo>();
 
@@ -423,7 +435,6 @@ namespace Trinet.Core.IO.Ntfs
 					bool finished = false;
 					IntPtr context = IntPtr.Zero;
 					int bytesRead;
-					string name;
 
 					try
 					{
@@ -441,6 +452,7 @@ namespace Trinet.Core.IO.Ntfs
 							else
 							{
 								// Read the stream name:
+								string name;
 								if (0 >= streamId.StreamNameSize)
 								{
 									name = null;
@@ -475,8 +487,7 @@ namespace Trinet.Core.IO.Ntfs
 								// Skip the contents of the stream:
 								if (0 != streamId.Size.Low || 0 != streamId.Size.High)
 								{
-									int bytesSeekedLow, bytesSeekedHigh;
-									if (!finished && !BackupSeek(hFile, streamId.Size.Low, streamId.Size.High, out bytesSeekedLow, out bytesSeekedHigh, ref context))
+									if (!finished && !BackupSeek(hFile, streamId.Size.Low, streamId.Size.High, out _, out _, ref context))
 									{
 										finished = true;
 									}
